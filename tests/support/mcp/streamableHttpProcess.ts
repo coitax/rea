@@ -10,12 +10,19 @@ const STARTUP_TIMEOUT_MS = 30_000;
 export interface McpHttpProcess {
   readonly child: ChildProcessWithoutNullStreams;
   readonly url: URL;
+  /** The announced `Authorization` header, or none when the listener admits clients without one. */
+  readonly headers: Readonly<Record<string, string>>;
   /** Everything the child has written to stderr so far. */
   readonly stderr: () => string;
 }
 
-/** Find the bound URL in the pino JSON lines the listener writes to stderr. */
-const listeningUrl = (stderr: string): URL | undefined => {
+interface Listening {
+  readonly url: URL;
+  readonly headers: Readonly<Record<string, string>>;
+}
+
+/** Find the bound URL and credential in the pino JSON lines the listener writes to stderr. */
+const listening = (stderr: string): Listening | undefined => {
   for (const line of stderr.split("\n")) {
     let entry: unknown;
     try {
@@ -31,7 +38,14 @@ const listeningUrl = (stderr: string): URL | undefined => {
       "url" in entry &&
       typeof entry.url === "string"
     )
-      return new URL(entry.url);
+      return {
+        url: new URL(entry.url),
+        headers:
+          "client_credential" in entry &&
+          typeof entry.client_credential === "string"
+            ? { authorization: `Bearer ${entry.client_credential}` }
+            : {},
+      };
   }
   return undefined;
 };
@@ -56,7 +70,7 @@ export const startListeningProcess = async (
   // A closed stdin must not end the listener; only signals do.
   child.stdin.end();
   let stderr = "";
-  const url = await new Promise<URL>((resolve, reject) => {
+  const announced = await new Promise<Listening>((resolve, reject) => {
     const timer = setTimeout(
       () =>
         reject(
@@ -68,7 +82,7 @@ export const startListeningProcess = async (
     );
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
-      const found = listeningUrl(stderr);
+      const found = listening(stderr);
       if (found === undefined) return;
       clearTimeout(timer);
       resolve(found);
@@ -82,7 +96,7 @@ export const startListeningProcess = async (
       );
     });
   });
-  return { child, url, stderr: () => stderr };
+  return { child, ...announced, stderr: () => stderr };
 };
 
 /** Spawn `rea mcp --http --port 0` and resolve once it names its URL. */

@@ -50,10 +50,12 @@ export const rawHttpRequest = (
 /** Assert the MCP endpoint refuses a Host header outside the loopback allowlist. */
 export const expectForeignHostRefused = async (
   url: URL,
+  headers: Readonly<Record<string, string>> = {},
 ): Promise<RawHttpResponse> => {
   const refused = await rawHttpRequest(url, {
     method: "POST",
     headers: {
+      ...headers,
       host: "rea.invalid",
       "content-type": "application/json",
       accept: "application/json, text/event-stream",

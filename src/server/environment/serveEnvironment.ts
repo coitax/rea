@@ -477,6 +477,9 @@ export const serveEnvironment = async (
   const served = await serveStreamableHttp({
     host,
     port,
+    // Exported bundles are reached by an agent-env harness that cannot read this process's
+    // stderr; the catalog answers from recordings and state and cannot run host commands.
+    clientAuthentication: "none",
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     createMcpServer: () => createEnvironmentMcpServer(name, tools, answer),
     routes: environmentRoutes(

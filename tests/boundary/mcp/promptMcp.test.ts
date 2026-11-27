@@ -540,7 +540,13 @@ it.each(["replacement", "shutdown"])(
       const client = new Client({ name: "completion-http", version: "1" });
       resources.push(client);
       await client.connect(
-        new StreamableHTTPClientTransport(new URL(served.url)),
+        new StreamableHTTPClientTransport(new URL(served.url), {
+          requestInit: {
+            headers: {
+              authorization: `Bearer ${served.clientCredential ?? ""}`,
+            },
+          },
+        }),
       );
       return client;
     };

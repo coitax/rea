@@ -24,6 +24,7 @@ import {
   UnsupportedRequestTargetError,
   writeWebResponse,
 } from "./nodeHttpBridge.js";
+import { BearerCredential } from "./bearerCredential.js";
 import { listenHttpServer } from "./listenHttpServer.js";
 import { StreamableHttpListenError } from "./streamableHttpListenError.js";
 import {
@@ -63,11 +64,19 @@ export interface ServeStreamableHttpOptions {
   readonly onerror?: (error: StreamableHttpListenError) => void;
   /** Close the server instance as the last stage of `close`; false when the factory's owner closes it. */
   readonly closeInstance?: boolean;
+  /**
+   * `"bearer"` (default) admits only requests presenting this listener's
+   * announced credential. `"none"` admits any client that passes the Host and
+   * Origin checks; reserve it for catalogs that cannot act on the host.
+   */
+  readonly clientAuthentication?: "bearer" | "none";
 }
 
 export interface StreamableHttpServer {
   /** The bound MCP endpoint URL. */
   readonly url: string;
+  /** Presented as `Authorization: Bearer`; undefined when the listener admits clients without one. */
+  readonly clientCredential: string | undefined;
   /** Stop incoming dispatch and drain handlers before shared provider owners close. */
   readonly prepareShutdown: () => Promise<void>;
   readonly close: () => Promise<void>;
@@ -130,6 +139,15 @@ const SHUTTING_DOWN = (): Response =>
   jsonError(503, -32000, "Server shutting down");
 const SESSION_NOT_FOUND = (): Response =>
   jsonError(404, -32001, "Session not found");
+const UNAUTHORIZED = (): Response => {
+  const response = jsonError(
+    401,
+    -32000,
+    "Present the listener's client credential as Authorization: Bearer",
+  );
+  response.headers.set("www-authenticate", "Bearer");
+  return response;
+};
 const DEFAULT_SESSION_DRAIN_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_CONCURRENT_DISPATCHES = 8;
 
@@ -468,6 +486,10 @@ export const serveStreamableHttp = async (
   options: ServeStreamableHttpOptions,
 ): Promise<StreamableHttpServer> => {
   const { host, port, logger, routes = [], closeInstance = true } = options;
+  const credential =
+    options.clientAuthentication === "none"
+      ? undefined
+      : new BearerCredential();
   // Scoped IPv6 literals bind but cannot be named in a URL; refuse them before anything exists.
   if (host.includes("%"))
     throw new StreamableHttpListenError(
@@ -484,6 +506,12 @@ export const serveStreamableHttp = async (
       response,
       admissionLifetime: "response" as const,
     });
+    // Before any other check, so an unauthenticated peer learns nothing and cannot replace a session.
+    if (
+      credential !== undefined &&
+      !credential.admits(request.headers.get("authorization"))
+    )
+      return local(UNAUTHORIZED());
     if (stopped) return local(jsonError(503, -32000, "Server shutting down"));
     // One loopback allowlist gates Host (DNS rebinding) and Origin (browser pages); a missing Origin passes.
     const refused =
@@ -604,10 +632,23 @@ export const serveStreamableHttp = async (
       "MCP HTTP Host header validation relaxed for a non-loopback bind",
     );
   // The URL is the only way to reach an ephemeral port, so the announcement ignores the log threshold.
-  logger
-    ?.child({}, { level: "info" })
-    .info({ transport: "streamable-http", url }, "MCP transport listening");
-  return { url, prepareShutdown, close };
+  // stderr is the operator's channel, so it alone carries the credential.
+  logger?.child({}, { level: "info" }).info(
+    {
+      transport: "streamable-http",
+      url,
+      ...(credential === undefined
+        ? {}
+        : { client_credential: credential.value }),
+    },
+    "MCP transport listening",
+  );
+  return {
+    url,
+    clientCredential: credential?.value,
+    prepareShutdown,
+    close,
+  };
 };
 
 /** Stop accepting, drop open connections and release the port. */

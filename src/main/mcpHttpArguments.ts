@@ -39,7 +39,7 @@ export const renderMcpHttpHelp = (): string =>
     hideGlobalOptions: true,
     options: MCP_HTTP_OPTIONS,
     alias: MCP_HTTP_ALIAS,
-    hint: "This entry accepts only the options above. The bound URL is logged as one JSON line on stderr.",
+    hint: "This entry accepts only the options above. The bound URL and the client_credential every request must present as Authorization: Bearer are logged as one JSON line on stderr.",
   });
 
 /** Parsed `rea mcp --http` arguments; omitted values defer to the environment. */

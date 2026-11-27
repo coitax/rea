@@ -498,6 +498,11 @@ manifest's `name` is used, and a set but blank value is refused as
 `configuration_invalid` before binding rather than silently falling back. The
 listener serves one MCP client at a time with the same session, `Host` header
 and shutdown contract as [transports](mcp-contracts.md#transports) describes.
+Unlike `rea mcp --http`, it announces no `client_credential` and admits clients
+without one, because an exported bundle's harness reaches it from outside the
+container. Its catalog answers only from recordings and the state, but any
+local account that can reach the port can read the served content and change
+the state; serve it only where that is acceptable.
 It runs until SIGINT or SIGTERM, then closes the listener, prints one
 `{"status":"stopped", …}` document whose `state` member says whether it served
 from the state, and exits `130` or `143`.
