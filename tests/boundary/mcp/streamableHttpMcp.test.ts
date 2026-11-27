@@ -6,14 +6,22 @@ import { describe, expect, onTestFinished } from "vitest";
 
 import { advertisedMcpToolSchemas } from "../../fixtures/advertisedMcpTool.js";
 import { expectForeignHostRefused } from "../../support/http/rawRequest.js";
-import { startMcpHttpProcess } from "../../support/mcp/streamableHttpProcess.js";
+import {
+  startMcpHttpProcess,
+  type McpHttpProcess,
+} from "../../support/mcp/streamableHttpProcess.js";
 import { processTest } from "../../support/process/processFixture.js";
 import { assertAdvertisedMcpContracts } from "./mcpContractHarness.js";
 
 const HTTP_BOUNDARY_TIMEOUT_MS = 90_000;
 
-const openSession = async (url: URL, name: string) => {
-  const transport = new StreamableHTTPClientTransport(url);
+const openSession = async (
+  { url, headers }: Pick<McpHttpProcess, "url" | "headers">,
+  name: string,
+) => {
+  const transport = new StreamableHTTPClientTransport(url, {
+    requestInit: { headers },
+  });
   const client = new Client({ name, version: "1" });
   onTestFinished(() => client.close());
   await client.connect(transport);
@@ -54,16 +62,16 @@ describe("rea mcp --http", () => {
       started.child.stdout.on("data", (chunk: Buffer) => {
         stdout += chunk.toString("utf8");
       });
-      const first = await openSession(started.url, "streamable-http-boundary");
+      const first = await openSession(started, "streamable-http-boundary");
       await expectIdentity(first);
       await first.transport.terminateSession();
       expect(first.transport.sessionId).toBeUndefined();
       await first.client.close();
       // DELETE ended the session, not the server: the next client's tools still work.
-      const second = await openSession(started.url, "next-session");
+      const second = await openSession(started, "next-session");
       await expectIdentity(second);
       // A client that leaves without DELETE does not block the listener: the next initialize replaces it.
-      const third = await openSession(started.url, "replacing-session");
+      const third = await openSession(started, "replacing-session");
       expect(third.transport.sessionId).not.toBe(second.transport.sessionId);
       await expectIdentity(third);
       await expect(expectIdentity(second)).rejects.toThrow("Session not found");
@@ -82,8 +90,8 @@ describe("rea mcp --http", () => {
   processTest(
     "refuses a non-loopback Host header on the loopback bind",
     async ({ processes }) => {
-      const { url } = await startMcpHttpProcess(processes);
-      const refused = await expectForeignHostRefused(url);
+      const { url, headers } = await startMcpHttpProcess(processes);
+      const refused = await expectForeignHostRefused(url, headers);
       expect(refused.body).not.toContain("127.0.0.1");
     },
     HTTP_BOUNDARY_TIMEOUT_MS,

@@ -82,8 +82,15 @@ const start = async (
   };
 };
 
-const connect = async (url: string) => {
-  const transport = new StreamableHTTPClientTransport(new URL(url));
+/** The Authorization header the listener announced to its operator. */
+const bearer = (served: StreamableHttpServer): Record<string, string> => ({
+  authorization: `Bearer ${served.clientCredential ?? ""}`,
+});
+
+const connect = async (served: StreamableHttpServer) => {
+  const transport = new StreamableHTTPClientTransport(new URL(served.url), {
+    requestInit: { headers: bearer(served) },
+  });
   const client = new Client({ name: "streamable-http-adapter", version: "1" });
   await client.connect(transport);
   return { transport, client };
@@ -187,17 +194,18 @@ it("announces the bound URL and serves one session at a time on one live instanc
     expect.objectContaining({
       transport: "streamable-http",
       url: served.url,
+      client_credential: served.clientCredential,
       msg: "MCP transport listening",
     }),
   );
-  const first = await connect(served.url);
+  const first = await connect(served);
   const sessionId = first.transport.sessionId;
   expect(sessionId).toEqual(expect.any(String));
   await expect(echo(first.client, "hi")).resolves.toEqual([
     { type: "text", text: "hi" },
   ]);
   // A new client's initialize replaces the open session; the earlier client is refused.
-  const second = await connect(served.url);
+  const second = await connect(served);
   expect(second.transport.sessionId).toEqual(expect.any(String));
   expect(second.transport.sessionId).not.toBe(sessionId);
   await expect(echo(first.client, "stale")).rejects.toThrow();
@@ -209,7 +217,7 @@ it("announces the bound URL and serves one session at a time on one live instanc
   await second.transport.terminateSession();
   expect(second.transport.sessionId).toBeUndefined();
   await second.client.close();
-  const third = await connect(served.url);
+  const third = await connect(served);
   await expect(echo(third.client, "again")).resolves.toEqual([
     { type: "text", text: "again" },
   ]);
@@ -259,15 +267,20 @@ it("serves plain routes beside the MCP endpoint and answers unknown paths with 4
       },
     ],
   });
-  const probe = await fetch(new URL("/.well-known/probe", served.url));
+  const probe = await fetch(new URL("/.well-known/probe", served.url), {
+    headers: bearer(served),
+  });
   await expect(probe.json()).resolves.toEqual({ probe: true });
-  const missing = await fetch(new URL("/missing", served.url));
+  const missing = await fetch(new URL("/missing", served.url), {
+    headers: bearer(served),
+  });
   expect(missing.status).toBe(404);
   await expect(missing.json()).resolves.toMatchObject({
     error: { code: -32601 },
   });
   const wrongMethod = await fetch(new URL("/.well-known/probe", served.url), {
     method: "POST",
+    headers: bearer(served),
     body: "{}",
   });
   expect(wrongMethod.status).toBe(404);
@@ -276,7 +289,7 @@ it("serves plain routes beside the MCP endpoint and answers unknown paths with 4
 it("refuses foreign Host headers on a loopback bind and frees the port on close", async () => {
   const { served } = await start();
   const url = new URL(served.url);
-  await expectForeignHostRefused(url);
+  await expectForeignHostRefused(url, bearer(served));
   await served.close();
   await served.close();
   await expect(rawHttpRequest(url)).rejects.toMatchObject({
@@ -361,13 +374,14 @@ it("retries unfinished cleanup after a close stage fails instead of replaying th
 
 it("leaves a sessionless POST without the streamable headers or with a foreign Origin to refusal, keeping the session", async () => {
   const { served } = await start();
-  const { client } = await connect(served.url);
+  const { client } = await connect(served);
   const url = new URL(served.url);
   const body = await initializeRequest().text();
   const host = `127.0.0.1:${url.port}`;
   const plain = await rawHttpRequest(url, {
     method: "POST",
     headers: {
+      ...bearer(served),
       host,
       "content-type": "text/plain",
       accept: "application/json, text/event-stream",
@@ -379,6 +393,7 @@ it("leaves a sessionless POST without the streamable headers or with a foreign O
   const foreign = await rawHttpRequest(url, {
     method: "POST",
     headers: {
+      ...bearer(served),
       host,
       origin: "http://attacker.example",
       "content-type": "application/json",
@@ -403,6 +418,7 @@ it("accepts a same-origin browser Origin carrying the bound port on the MCP endp
   const body = await initializeRequest().text();
   for (const name of ["127.0.0.1", "localhost"]) {
     const headers = {
+      ...bearer(served),
       host: `${name}:${url.port}`,
       origin: `http://${name}:${url.port}`,
     };
@@ -437,11 +453,12 @@ it("announces the bound URL even when the log level hides info lines", async () 
 
 it("does not let a JSON-suffixed media type replace the session", async () => {
   const { served } = await start();
-  const { client } = await connect(served.url);
+  const { client } = await connect(served);
   const url = new URL(served.url);
   const patch = await rawHttpRequest(url, {
     method: "POST",
     headers: {
+      ...bearer(served),
       host: `127.0.0.1:${url.port}`,
       "content-type": "application/json-patch+json",
       accept: "application/json, text/event-stream",
@@ -547,11 +564,12 @@ it("leaves the instance to its owner when closeInstance is false", async () => {
 
 it("requires exact Accept media ranges before a sessionless POST may replace the session", async () => {
   const { served } = await start();
-  const { client } = await connect(served.url);
+  const { client } = await connect(served);
   const url = new URL(served.url);
   const lookalike = await rawHttpRequest(url, {
     method: "POST",
     headers: {
+      ...bearer(served),
       host: `127.0.0.1:${url.port}`,
       "content-type": "application/json",
       accept: "application/json-patch+json, text/event-streaming",
@@ -632,12 +650,13 @@ it("runs the instance's shutdown hook exactly once when the slot closes without 
 
 it("answers an oversized sessionless POST promptly instead of stalling on the probe", async () => {
   const { served } = await start();
-  const { client } = await connect(served.url);
+  const { client } = await connect(served);
   const url = new URL(served.url);
   // The SDK refuses the body as soon as it exceeds the bound, so the upload may end in a broken pipe.
   await rawHttpRequest(url, {
     method: "POST",
     headers: {
+      ...bearer(served),
       host: `127.0.0.1:${url.port}`,
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -667,7 +686,7 @@ it("closes the connection after a reply sent before the request body was read, o
   try {
     const unread = await keepAliveRequest(agent, new URL("/nowhere", url), {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...bearer(served), "content-type": "application/json" },
       body: '{"never":"read"}',
     });
     expect(unread.status).toBe(404);
@@ -676,7 +695,11 @@ it("closes the connection after a reply sent before the request body was read, o
     // Node's parser refuses a chunked GET body itself; a declared Content-Length reaches the bridge.
     const bodyOnGet = await keepAliveRequest(agent, new URL("/nowhere", url), {
       method: "GET",
-      headers: { "content-type": "text/plain", "content-length": "15" },
+      headers: {
+        ...bearer(served),
+        "content-type": "text/plain",
+        "content-length": "15",
+      },
       body: "a body on a GET",
     });
     expect(bodyOnGet.status).toBe(404);
@@ -684,6 +707,7 @@ it("closes the connection after a reply sent before the request body was read, o
     expect(bodyOnGet.socketClosed).toBe(true);
     const bodiless = await keepAliveRequest(agent, new URL("/nowhere", url), {
       method: "GET",
+      headers: bearer(served),
     });
     expect(bodiless.status).toBe(404);
     expect(bodiless.headers.connection).not.toBe("close");
@@ -702,7 +726,7 @@ it("answers a method Fetch refuses instead of letting it escape the request guar
   });
   expect(trace.status).toBe(405);
   expect(trace.headers.connection).toBe("close");
-  const { client } = await connect(served.url);
+  const { client } = await connect(served);
   expect(await echo(client, "still alive")).toEqual([
     { type: "text", text: "still alive" },
   ]);
@@ -713,6 +737,7 @@ it("answers a method Fetch refuses instead of letting it escape the request guar
 const rawTargetRequest = (
   served: URL,
   target: string,
+  headers: Readonly<Record<string, string>>,
 ): Promise<{ status: number; body: string }> =>
   new Promise((resolve, reject) => {
     const request = httpRequest(
@@ -722,7 +747,7 @@ const rawTargetRequest = (
         path: target,
         method: "GET",
         agent: false,
-        headers: { host: `127.0.0.1:${served.port}` },
+        headers: { ...headers, host: `127.0.0.1:${served.port}` },
       },
       (response) => {
         let body = "";
@@ -754,18 +779,30 @@ it("keeps a network-path request target as a path and refuses absolute-form targ
     ],
   });
   const url = new URL(served.url);
-  const networkPath = await rawTargetRequest(url, "//attacker.example/card");
+  const networkPath = await rawTargetRequest(
+    url,
+    "//attacker.example/card",
+    bearer(served),
+  );
   expect(networkPath.status).toBe(404);
   expect(networkPath.body).toContain(
     "No route for GET //attacker.example/card",
   );
-  const absolute = await rawTargetRequest(url, "http://attacker.example/card");
+  const absolute = await rawTargetRequest(
+    url,
+    "http://attacker.example/card",
+    bearer(served),
+  );
   expect(absolute.status).toBe(400);
   // Dot segments would route a different path than the one requested; they are refused, not canonicalized.
   for (const target of ["/public/../mcp", "/public/%2e%2e/mcp", "/./mcp"])
-    expect((await rawTargetRequest(url, target)).status).toBe(400);
-  expect((await rawTargetRequest(url, "/card?x=1")).status).toBe(200);
-  const plain = await rawTargetRequest(url, "/card");
+    expect((await rawTargetRequest(url, target, bearer(served))).status).toBe(
+      400,
+    );
+  expect(
+    (await rawTargetRequest(url, "/card?x=1", bearer(served))).status,
+  ).toBe(200);
+  const plain = await rawTargetRequest(url, "/card", bearer(served));
   expect(plain.status).toBe(200);
   // Both successful route calls saw only the bound host, never the attacker-selected one.
   expect(seen).toEqual([`127.0.0.1:${url.port}`, `127.0.0.1:${url.port}`]);
@@ -783,9 +820,15 @@ it("refuses raw fragments without changing an encoded query value", async () => 
   });
   const url = new URL(served.url);
   for (const target of ["/plain?token=a#b", "/plain?token=a#"])
-    expect((await rawTargetRequest(url, target)).status).toBe(400);
+    expect((await rawTargetRequest(url, target, bearer(served))).status).toBe(
+      400,
+    );
   expect(handled).not.toHaveBeenCalled();
-  const valid = await rawTargetRequest(url, "/plain?token=a%23b");
+  const valid = await rawTargetRequest(
+    url,
+    "/plain?token=a%23b",
+    bearer(served),
+  );
   expect(valid.status).toBe(200);
   expect(JSON.parse(valid.body)).toEqual({
     token: "a#b",
@@ -797,12 +840,13 @@ it.each([1, 2])(
   "refuses a %i-message initialize batch without replacing a session",
   async (size) => {
     const { served } = await start();
-    const { client } = await connect(served.url);
+    const { client } = await connect(served);
     const url = new URL(served.url);
     const single = JSON.parse(await initializeRequest().text()) as unknown;
     const batch = await rawHttpRequest(url, {
       method: "POST",
       headers: {
+        ...bearer(served),
         host: `127.0.0.1:${url.port}`,
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
@@ -829,6 +873,7 @@ it("refuses an initialize batch before opening the first session", async () => {
   const response = await rawHttpRequest(url, {
     method: "POST",
     headers: {
+      ...bearer(served),
       host: `127.0.0.1:${url.port}`,
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -836,7 +881,7 @@ it("refuses an initialize batch before opening the first session", async () => {
     body: JSON.stringify([single]),
   });
   expect(response.status).toBe(400);
-  const { client } = await connect(served.url);
+  const { client } = await connect(served);
   expect(await echo(client, "valid initialization")).toEqual([
     { type: "text", text: "valid initialization" },
   ]);
@@ -885,6 +930,7 @@ it("closes the connection when a route read only part of the body and keeps it a
     const partial = await keepAliveRequest(agent, new URL("/partial", url), {
       method: "POST",
       headers: {
+        ...bearer(served),
         "content-type": "text/plain",
         "content-length": String(body.length),
       },
@@ -896,6 +942,7 @@ it("closes the connection when a route read only part of the body and keeps it a
     const whole = await keepAliveRequest(agent, new URL("/whole", url), {
       method: "POST",
       headers: {
+        ...bearer(served),
         "content-type": "text/plain",
         "content-length": String(body.length),
       },
@@ -911,7 +958,7 @@ it("closes the connection when a route read only part of the body and keeps it a
 
 it("does not let a zero-quality, quoted or SDK-refused Accept qualify a session takeover", async () => {
   const { served } = await start();
-  const { client } = await connect(served.url);
+  const { client } = await connect(served);
   const url = new URL(served.url);
   // The second header holds one range: the comma and `text/event-stream` sit inside a quoted parameter.
   // The third is valid HTTP, but the SDK matches media types with case and would answer 406.
@@ -923,6 +970,7 @@ it("does not let a zero-quality, quoted or SDK-refused Accept qualify a session 
     const refused = await rawHttpRequest(url, {
       method: "POST",
       headers: {
+        ...bearer(served),
         host: `127.0.0.1:${url.port}`,
         "content-type": "application/json",
         accept,
@@ -980,7 +1028,7 @@ it.each(["replacement", "DELETE"])(
         return server;
       },
     });
-    const first = await connect(served.url);
+    const first = await connect(served);
     let next: Awaited<ReturnType<typeof connect>> | undefined;
     let replacement: ReturnType<typeof connect> | undefined;
     try {
@@ -992,7 +1040,7 @@ it.each(["replacement", "DELETE"])(
         ending === "DELETE" ? first.transport.terminateSession() : undefined;
       if (deletion !== undefined) await aborted;
       let connected = false;
-      replacement = connect(served.url).then((value) => {
+      replacement = connect(served).then((value) => {
         connected = true;
         next = value;
         return value;
@@ -1028,9 +1076,11 @@ it.each(["ready", "failure"] as const)(
     const factoryGate = createGate();
     const failure = new Error("provider unavailable");
     const handled = vi.fn(() => new Response("ready"));
+    // Nobody holds a credential before the announcement, so the starting gate is observed without one.
     const starting = serveStreamableHttp({
       host: "127.0.0.1",
       port: Number(url.port),
+      clientAuthentication: "none",
       createMcpServer: async () => {
         factoryStarted.release();
         await factoryGate.promise;
@@ -1098,9 +1148,9 @@ it.each(["open stream", "late response"])(
         },
       ],
     });
-    const response = fetch(new URL("/stream", served.url)).catch(
-      () => undefined,
-    );
+    const response = fetch(new URL("/stream", served.url), {
+      headers: bearer(served),
+    }).catch(() => undefined);
     await entered.promise;
     if (timing === "open stream") await response;
     let closed = false;
@@ -1159,7 +1209,9 @@ it.each(["chunk", "headers"])(
         },
       ],
     });
-    const received = fetch(new URL("/broken", served.url))
+    const received = fetch(new URL("/broken", served.url), {
+      headers: bearer(served),
+    })
       .then(async (response) => {
         await response.arrayBuffer();
       })
@@ -1169,7 +1221,13 @@ it.each(["chunk", "headers"])(
       await vi.waitFor(() => {
         expect(cancelled).toBe(1);
       });
-      expect((await fetch(new URL("/health", served.url))).status).toBe(503);
+      expect(
+        (
+          await fetch(new URL("/health", served.url), {
+            headers: bearer(served),
+          })
+        ).status,
+      ).toBe(503);
       let closed = false;
       closing = served.prepareShutdown().then(() => {
         closed = true;
@@ -1207,6 +1265,7 @@ it("keeps HEAD delivery prompt while joining a retained tee's cleanup on shutdow
   });
   const response = await fetch(new URL("/cached", served.url), {
     method: "HEAD",
+    headers: bearer(served),
   });
   expect(response.status).toBe(200);
   let closed = false;
@@ -1248,11 +1307,19 @@ it("retains failed response cleanup and blocks provider teardown and further adm
       },
     ],
   });
-  const response = await fetch(new URL("/failed", served.url));
+  const response = await fetch(new URL("/failed", served.url), {
+    headers: bearer(served),
+  });
   try {
     await response.body?.cancel();
     await vi.waitFor(async () => {
-      expect((await fetch(new URL("/health", served.url))).status).toBe(503);
+      expect(
+        (
+          await fetch(new URL("/health", served.url), {
+            headers: bearer(served),
+          })
+        ).status,
+      ).toBe(503);
     });
     await expect(served.prepareShutdown()).rejects.toMatchObject({
       _tag: "AnalysisResourceConstraintError",
@@ -1299,16 +1366,30 @@ it("retains plain-response admission until asynchronous cancellation settles", a
       },
     ],
   });
-  const response = await fetch(new URL("/stream", served.url));
+  const response = await fetch(new URL("/stream", served.url), {
+    headers: bearer(served),
+  });
   try {
-    expect((await fetch(new URL("/health", served.url))).status).toBe(503);
+    expect(
+      (await fetch(new URL("/health", served.url), { headers: bearer(served) }))
+        .status,
+    ).toBe(503);
     await response.body?.cancel();
     await cancelling.promise;
-    expect((await fetch(new URL("/health", served.url))).status).toBe(503);
+    expect(
+      (await fetch(new URL("/health", served.url), { headers: bearer(served) }))
+        .status,
+    ).toBe(503);
     expect(health).not.toHaveBeenCalled();
     cleanup.release();
     await vi.waitFor(async () => {
-      expect((await fetch(new URL("/health", served.url))).status).toBe(200);
+      expect(
+        (
+          await fetch(new URL("/health", served.url), {
+            headers: bearer(served),
+          })
+        ).status,
+      ).toBe(200);
     });
   } finally {
     cleanup.release();
@@ -1330,7 +1411,7 @@ it("supports sequential keep-alive requests on the same connection", async () =>
       const result = await keepAliveRequest(
         agent,
         new URL("/health", served.url),
-        { method: "GET" },
+        { method: "GET", headers: bearer(served) },
       );
       expect(result.status).toBe(200);
       expect(result.socketClosed).toBe(false);
@@ -1401,7 +1482,7 @@ it.each(["pending handler", "open response"])(
     socket.on("error", () => undefined);
     socket.on("data", () => undefined);
     const request = (path: string) =>
-      `GET ${path} HTTP/1.1\r\nHost: ${url.host}\r\n\r\n`;
+      `GET ${path} HTTP/1.1\r\nHost: ${url.host}\r\nAuthorization: ${bearer(served).authorization ?? ""}\r\n\r\n`;
     try {
       await new Promise<void>((resolve) => {
         socket.once("connect", resolve);
@@ -1462,9 +1543,9 @@ it.each(["prepareShutdown", "close"] as const)(
         },
       ],
     });
-    const response = fetch(new URL("/pending", served.url)).catch(
-      () => undefined,
-    );
+    const response = fetch(new URL("/pending", served.url), {
+      headers: bearer(served),
+    }).catch(() => undefined);
     await started;
     let closed = false;
     const closing = served[method]().then(() => {
@@ -1515,7 +1596,7 @@ it("retains admission for an unread upload attached to a long response", async (
     new URL("/stream", served.url),
     {
       method: "POST",
-      headers: { "content-length": "1024" },
+      headers: { ...bearer(served), "content-length": "1024" },
     },
     (response) => {
       response.once("data", () => {
@@ -1531,10 +1612,19 @@ it("retains admission for an unread upload attached to a long response", async (
     await vi.waitFor(() => {
       expect(received).toBe(true);
     });
-    expect((await fetch(new URL("/health", served.url))).status).toBe(503);
+    expect(
+      (await fetch(new URL("/health", served.url), { headers: bearer(served) }))
+        .status,
+    ).toBe(503);
     upload.destroy();
     await vi.waitFor(async () => {
-      expect((await fetch(new URL("/health", served.url))).status).toBe(200);
+      expect(
+        (
+          await fetch(new URL("/health", served.url), {
+            headers: bearer(served),
+          })
+        ).status,
+      ).toBe(200);
     });
   } finally {
     upload.destroy();
@@ -1548,7 +1638,7 @@ it("bounds HTTP input dispatch globally and releases admission when an upload le
       { method: "GET", path: "/health", handle: () => new Response("ok") },
     ],
   });
-  const first = await connect(served.url);
+  const first = await connect(served);
   const uploads: ReturnType<typeof httpRequest>[] = [];
   const pending: Promise<void>[] = [];
   try {
@@ -1560,6 +1650,7 @@ it("bounds HTTP input dispatch globally and releases admission when an upload le
             {
               method: "POST",
               headers: {
+                ...bearer(served),
                 accept: "application/json, text/event-stream",
                 "content-type": "application/json",
               },
@@ -1579,11 +1670,18 @@ it("bounds HTTP input dispatch globally and releases admission when an upload le
     // A plain route observes the same budget while both sessionless MCP probes
     // wait for the rest of their bodies. Idle SSE connections consume no permit.
     await vi.waitFor(async () => {
-      expect((await fetch(new URL("/health", served.url))).status).toBe(503);
+      expect(
+        (
+          await fetch(new URL("/health", served.url), {
+            headers: bearer(served),
+          })
+        ).status,
+      ).toBe(503);
     });
     const refused = await rawHttpRequest(new URL(served.url), {
       method: "POST",
       headers: {
+        ...bearer(served),
         accept: "application/json, text/event-stream",
         "content-type": "application/json",
         "content-length": String(4 * 1024 * 1024),
@@ -1594,7 +1692,13 @@ it("bounds HTTP input dispatch globally and releases admission when an upload le
     uploads[0]?.destroy();
     await pending[0];
     await vi.waitFor(async () => {
-      expect((await fetch(new URL("/health", served.url))).status).toBe(200);
+      expect(
+        (
+          await fetch(new URL("/health", served.url), {
+            headers: bearer(served),
+          })
+        ).status,
+      ).toBe(200);
     });
     expect(await echo(first.client, "kept during overload")).toEqual([
       { type: "text", text: "kept during overload" },
@@ -1672,7 +1776,7 @@ it.each(["DELETE", "shutdown"])(
   "ends a real HTTP request with an unfinished upload during %s",
   async (ending) => {
     const { served, shutdownHooks } = await start();
-    const first = await connect(served.url);
+    const first = await connect(served);
     const entered = vi.spyOn(
       WebStandardStreamableHTTPServerTransport.prototype,
       "handleRequest",
@@ -1685,6 +1789,7 @@ it.each(["DELETE", "shutdown"])(
         {
           method: "POST",
           headers: {
+            ...bearer(served),
             accept: "application/json, text/event-stream",
             "content-type": "application/json",
             "mcp-session-id": first.transport.sessionId ?? "",
@@ -1716,7 +1821,7 @@ it.each(["DELETE", "shutdown"])(
       if (ending === "DELETE") {
         await first.transport.terminateSession();
         expect(await response).toBe(404);
-        next = await connect(served.url);
+        next = await connect(served);
         expect(await echo(next.client, "after upload")).toEqual([
           { type: "text", text: "after upload" },
         ]);
@@ -1912,7 +2017,7 @@ it.each(["after timeout", "during drain"])(
         return server;
       },
     });
-    const first = await connect(served.url);
+    const first = await connect(served);
     try {
       void first.client
         .callTool({ name: "slow", arguments: {} })
@@ -1921,6 +2026,7 @@ it.each(["after timeout", "during drain"])(
       const replacement = fetch(served.url, {
         method: "POST",
         headers: {
+          ...bearer(served),
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
         },

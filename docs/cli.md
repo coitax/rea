@@ -735,7 +735,11 @@ rea mcp --http --port 8765
 `--host` and `--port` default to `MCP_HOST` and `MCP_PORT` from the environment,
 then to `127.0.0.1` and an ephemeral port. The bound URL is written to stderr as
 one JSON log line (`"msg":"MCP transport listening"`) whatever `REA_LOG_LEVEL`
-is set to; nothing is written to stdout. `rea mcp --http --help` lists the accepted options. The listener serves
+is set to; nothing is written to stdout. The same line carries
+`client_credential`, a random credential generated for this process: every
+request must present it as `Authorization: Bearer <client_credential>`, and any
+other request is refused with `401` before the `Host` and `Origin` checks or any
+session or tool work. Keep stderr private to the operator. `rea mcp --http --help` lists the accepted options. The listener serves
 one client at a time: a session ends with the client's `DELETE`, and a client
 that connects while another session is open takes it over, so a client that
 exited without ending its session needs no restart. The listener runs until

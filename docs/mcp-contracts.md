@@ -708,11 +708,21 @@ as one JSON log line on stderr (`"msg":"MCP transport listening"` with `url`)
 at every `REA_LOG_LEVEL`, because an ephemeral port is otherwise unreachable;
 stdout stays unused.
 
-This endpoint uses plain HTTP without TLS or client authentication. Use it only
-within a trusted local or isolated environment; an explicit non-loopback bind
-makes the same tools and active analysis state reachable at that address. It
-does not provide separate users or independent target sessions. Standard client
-registrations continue to use a dedicated stdio process.
+The same line carries `client_credential`: 32 random bytes, unpadded base64url,
+generated for this process and delivered only on its stderr. Every request,
+including `initialize`, `GET`, `DELETE` and plain routes, must present it as
+`Authorization: Bearer <client_credential>`; the credential is compared in
+constant time before the `Host` and `Origin` checks, and any other request is
+answered `401` before it can open, replace or reach a session. Query parameters
+are not credentials. Whoever can read the listener's stderr can call every tool
+as the REA user, so keep it private to the operator.
+
+This endpoint uses plain HTTP without TLS. Use it only within a trusted local or
+isolated environment; an explicit non-loopback bind sends the credential in
+cleartext and makes the same tools and active analysis state reachable at that
+address to anyone who observes it. It does not provide separate users or
+independent target sessions. Standard client registrations continue to use a
+dedicated stdio process.
 
 The HTTP server is stateful and serves one client at a time on one server
 instance. `initialize` returns an `Mcp-Session-Id`; `notifications/initialized`
